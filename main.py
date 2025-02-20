@@ -16,11 +16,15 @@ from PyQt5.QtCore import *
 import cv2
 # All array operations are performed using numpy library
 import numpy as np
+from scipy.fftpack import dct, idct
+import pywt
 
 # The GUI structure definition is provided in gui.py
 from gui import *
 # Image restoration logic is defined in imageRestorationFns.py
 import imageRestorationFns as ir
+# Image compression logic is defined in imageCompressionFns.py
+import imageCompressionFns as ic
 
 
 # class ImageEditorClass implements the GUI main window class
@@ -42,23 +46,31 @@ class ImageRestorationClass(QMainWindow):
         super(ImageRestorationClass, self).__init__()
         self.ui = ImageRestorationGuiClass()
         self.ui.setupUi(self)
-
-        # Assigning functions to be called on all button clicked events and
-        # combo box change events
-        self.ui.buttonOpen.clicked.connect(lambda: self.open_image())
-        self.ui.buttonSave.clicked.connect(lambda: self.save_image())
-        self.ui.buttonFullInv.clicked.connect(lambda: self.call_full_inverse())
-        self.ui.buttonInv.clicked.connect(lambda: self.call_truncated_inverse_filter())
-        self.ui.buttonWeiner.clicked.connect(lambda: self.call_weiner_filter())
-        self.ui.buttonCLS.clicked.connect(lambda: self.call_constrained_ls_filter())
-        self.ui.buttonPSNR.clicked.connect(lambda: self.calculate_psnr())
-        self.ui.buttonSSIM.clicked.connect(lambda: self.calculate_ssim())
-        self.ui.buttonTrueImage.clicked.connect(lambda: self.set_true_image())
-        self.ui.buttonClearTrueImage.clicked.connect(lambda: self.reset_true_image())
-
-        self.ui.comboBoxKernel.currentIndexChanged.connect(lambda: self.displayKernel())
-
-        # disable all buttons initially, except open image button
+        
+        # Set window size and position
+        screen = QDesktopWidget().screenGeometry()
+        self.setGeometry(100, 100, int(screen.width() * 0.8), int(screen.height() * 0.8))
+        
+        # Connect buttons
+        self.ui.buttonOpen.clicked.connect(self.open_image)
+        self.ui.buttonSave.clicked.connect(self.save_image)
+        self.ui.buttonFullInv.clicked.connect(self.call_full_inverse)
+        self.ui.buttonInv.clicked.connect(self.call_truncated_inverse_filter)
+        self.ui.buttonWeiner.clicked.connect(self.call_weiner_filter)
+        self.ui.buttonCLS.clicked.connect(self.call_constrained_ls_filter)
+        self.ui.buttonPSNR.clicked.connect(self.calculate_psnr)
+        self.ui.buttonSSIM.clicked.connect(self.calculate_ssim)
+        self.ui.buttonTrueImage.clicked.connect(self.set_true_image)
+        self.ui.buttonClearTrueImage.clicked.connect(self.reset_true_image)
+        
+        self.ui.comboBoxKernel.currentIndexChanged.connect(self.displayKernel)
+        
+        # Connect compression controls
+        self.ui.qualitySlider.valueChanged.connect(self.updateQualityLabel)
+        self.ui.compressButton.clicked.connect(self.compressImage)
+        self.ui.saveCompressedButton.clicked.connect(self.saveCompressedImage)
+        self.ui.filterCombo.currentIndexChanged.connect(self.updateFilterParams)
+        
         self.disableAll()
 
     # calls the full inverse function
@@ -330,10 +342,7 @@ class ImageRestorationClass(QMainWindow):
         self.ui.buttonSSIM.setEnabled(True)
         self.ui.buttonTrueImage.setEnabled(True)
         self.ui.buttonClearTrueImage.setEnabled(True)
-
         self.ui.comboBoxKernel.setEnabled(True)
-        self.displayKernel()
-
         self.ui.input_radius.setEnabled(True)
         self.ui.input_K.setEnabled(True)
         self.ui.input_gamma.setEnabled(True)
@@ -358,9 +367,7 @@ class ImageRestorationClass(QMainWindow):
         self.ui.buttonSSIM.setEnabled(False)
         self.ui.buttonTrueImage.setEnabled(False)
         self.ui.buttonClearTrueImage.setEnabled(False)
-
         self.ui.comboBoxKernel.setEnabled(False)
-
         self.ui.input_radius.setEnabled(False)
         self.ui.input_K.setEnabled(False)
         self.ui.input_gamma.setEnabled(False)
@@ -373,6 +380,106 @@ class ImageRestorationClass(QMainWindow):
         self.ui.label_res_psnr.setText('--')
         self.ui.label_og_ssim.setText('--')
         self.ui.label_res_ssim.setText('--')
+
+    def updateQualityLabel(self):
+        value = self.ui.qualitySlider.value()
+        self.ui.qualityValue.setText(f"{value}%")
+        
+    def updateFilterParams(self):
+        filter_type = self.ui.filterCombo.currentText()
+        self.ui.kernelSizeInput.setEnabled(filter_type != "None")
+        
+    def applyPreFilter(self, image):
+        filter_type = self.ui.filterCombo.currentText()
+        kernel_size = self.ui.kernelSizeInput.value()
+        
+        if filter_type == "None":
+            return image
+        elif filter_type == "Gaussian Blur":
+            return cv2.GaussianBlur(image, (kernel_size, kernel_size), 0)
+        elif filter_type == "Median Filter":
+            return cv2.medianBlur(image, kernel_size)
+        elif filter_type == "Bilateral Filter":
+            return cv2.bilateralFilter(image, kernel_size, 75, 75)
+        
+    def compressImage(self):
+        if self.originalImage is None:
+            return
+            
+        # Apply pre-compression filter
+        filtered_image = self.applyPreFilter(self.originalImage)
+        
+        # Get compression parameters
+        method = self.ui.compressionMethod.currentText()
+        quality = self.ui.qualitySlider.value()
+        
+        if method == "DCT Compression":
+            self.currentImage = self.dctCompress(filtered_image, quality)
+        elif method == "Wavelet Compression":
+            self.currentImage = self.waveletCompress(filtered_image, quality)
+        elif method == "SVD Compression":
+            self.currentImage = self.svdCompress(filtered_image, quality)
+            
+        # Update compression info
+        original_size = self.originalImage.nbytes
+        compressed_size = self.currentImage.nbytes
+        ratio = original_size / compressed_size
+        
+        self.ui.compressionRatioLabel.setText(f"Compression Ratio: {ratio:.2f}:1")
+        self.ui.fileSizeLabel.setText(f"File Size: {compressed_size/1024:.1f} KB")
+        
+        # Display compressed image
+        self.displayOutputImage()
+        
+    def dctCompress(self, image, quality):
+        # DCT compression implementation
+        blocks = []
+        for i in range(0, image.shape[0], 8):
+            for j in range(0, image.shape[1], 8):
+                block = image[i:i+8, j:j+8]
+                if block.shape[0] != 8 or block.shape[1] != 8:
+                    continue
+                dct_block = dct(dct(block.T, norm='ortho').T, norm='ortho')
+                threshold = np.percentile(np.abs(dct_block), 100-quality)
+                dct_block[np.abs(dct_block) < threshold] = 0
+                blocks.append((i, j, dct_block))
+                
+        result = np.zeros_like(image)
+        for i, j, block in blocks:
+            result[i:i+8, j:j+8] = idct(idct(block.T, norm='ortho').T, norm='ortho')
+            
+        return result
+        
+    def waveletCompress(self, image, quality):
+        # Wavelet compression implementation
+        coeffs = pywt.dwt2(image, 'haar')
+        cA, (cH, cV, cD) = coeffs
+        
+        # Threshold based on quality
+        threshold = np.percentile(np.abs(cH), 100-quality)
+        cH[np.abs(cH) < threshold] = 0
+        cV[np.abs(cV) < threshold] = 0
+        cD[np.abs(cD) < threshold] = 0
+        
+        return pywt.idwt2((cA, (cH, cV, cD)), 'haar')
+        
+    def svdCompress(self, image, quality):
+        # SVD compression implementation
+        U, s, Vt = np.linalg.svd(image)
+        k = int((quality/100.0) * len(s))
+        compressed = np.dot(U[:, :k], np.dot(np.diag(s[:k]), Vt[:k, :]))
+        return np.clip(compressed, 0, 255).astype(np.uint8)
+        
+    def saveCompressedImage(self):
+        if self.currentImage is None:
+            return
+            
+        filename, _ = QFileDialog.getSaveFileName(
+            self, 'Save Compressed Image',
+            '', 'JPEG (*.jpg);;PNG (*.png)'
+        )
+        if filename:
+            cv2.imwrite(filename, self.currentImage)
 
 
 # initialize the ImageEditorClass and run the application

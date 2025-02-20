@@ -1,10 +1,4 @@
-# ---------------------------------------------------------------#
-# __name__ = "ImageRestoration_EE610_Assignment"
-# __author__ = "Shyama P"
-# __version__ = "1.0"
-# __email__ = "183079031@iitb.ac.in"
-# __status__ = "Development"
-# ---------------------------------------------------------------#
+
 
 # main.py contains the code for initializing and running the code for GUI
 import sys
